@@ -5,8 +5,19 @@ __pycache__/
 reportes/
 local-data/
 *.log
+.coverage
+.coverage.*
+htmlcov/
 .DS_Store
 Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.bak
+*.orig
+*.rej
+*.swp
+*~
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
