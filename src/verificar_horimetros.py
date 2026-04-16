@@ -1,29 +1,38 @@
-import argparse, pyodbc, re, os
-from datetime import datetime
+import argparse
+import os
+import re
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
-from colorama import Fore, Style, init
+
 import pandas as pd
+import pyodbc
+from colorama import Fore, Style, init
 
 # Cargar variables de entorno desde .env si existe
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except Exception:
     pass
 
 # CONFIG PORTABLE
 # Credenciales: desde ENV / .env (sin fallback hardcodeado)
-SERVER   = os.getenv("HORI_SERVER")   or os.getenv("SQL_SERVER",   "")
+SERVER = os.getenv("HORI_SERVER") or os.getenv("SQL_SERVER", "")
 DATABASE = os.getenv("HORI_DATABASE") or os.getenv("SQL_DATABASE", "")
-USER     = os.getenv("HORI_USER")     or os.getenv("SQL_USERNAME", "")
-PWD      = os.getenv("HORI_PWD")      or os.getenv("SQL_PASSWORD", "")
+USER = os.getenv("HORI_USER") or os.getenv("SQL_USERNAME", "")
+PWD = os.getenv("HORI_PWD") or os.getenv("SQL_PASSWORD", "")
 DEFAULT_SQL_DRIVERS = (
     "ODBC Driver 18 for SQL Server",
     "ODBC Driver 17 for SQL Server",
     "SQL Server Native Client 11.0",
     "SQL Server",
 )
+
+QCRow = dict[str, object]
+GeneratedReport = tuple[str, str]
+
 
 def resolve_base_dir(cli_out: str | None) -> Path:
     """
@@ -44,25 +53,25 @@ def resolve_base_dir(cli_out: str | None) -> Path:
 
 # QC parámetros
 COL = {
-    "Correcto":               Fore.GREEN,
-    "Horímetros en 0":        Fore.YELLOW,
+    "Correcto": Fore.GREEN,
+    "Horímetros en 0": Fore.YELLOW,
     "Sin horímetro reciente": Fore.MAGENTA,
     "Exceso en el horímetro": Fore.RED,
-    "Horas disminuidas":      Fore.RED,
+    "Horas disminuidas": Fore.RED,
 }
 
 # Colores para Excel por estado de ERROR
 XLSX_COLORS = {
     "Sin horímetro reciente": {"bg_color": "#FFEB9C", "font_color": "#000000"},  # amarillo
     "Exceso en el horímetro": {"bg_color": "#F8B88E", "font_color": "#000000"},  # naranja
-    "Horas disminuidas":      {"bg_color": "#F9A4A4", "font_color": "#000000"},  # rojo
+    "Horas disminuidas": {"bg_color": "#F9A4A4", "font_color": "#000000"},  # rojo
 }
-
 
 PRIO = {k: i for i, k in enumerate(COL.keys())}
 HARD_ERRORS = {"Exceso en el horímetro", "Horas disminuidas"}
 
 num_rx = re.compile(r"^\d+(\.\d+)?$")  # dígitos + punto opcional
+
 
 # helpers
 def env_int(name: str, default: int) -> int:
@@ -71,11 +80,13 @@ def env_int(name: str, default: int) -> int:
     except ValueError:
         return default
 
+
 def drivers_configurados() -> list[str]:
     raw = os.getenv("HORI_SQL_DRIVER", "").strip()
     if raw:
         return [drv.strip() for drv in re.split(r"[;,]", raw) if drv.strip()]
     return list(DEFAULT_SQL_DRIVERS)
+
 
 def variantes_server(server: str, port: int) -> list[str]:
     server = server.strip()
@@ -84,6 +95,7 @@ def variantes_server(server: str, port: int) -> list[str]:
     if server.lower().startswith("tcp:") or "\\" in server or "," in server:
         return [server]
     return [server, f"{server},{port}", f"tcp:{server},{port}"]
+
 
 def build_connection_candidates() -> list[tuple[str, str]]:
     installed = set(pyodbc.drivers())
@@ -107,18 +119,22 @@ def build_connection_candidates() -> list[tuple[str, str]]:
                 f"Connection Timeout={timeout}",
             ]
             if "ODBC Driver" in driver:
-                parts.extend([
-                    f"Encrypt={encrypt}",
-                    f"TrustServerCertificate={trust_cert}",
-                ])
+                parts.extend(
+                    [
+                        f"Encrypt={encrypt}",
+                        f"TrustServerCertificate={trust_cert}",
+                    ]
+                )
             if extra:
                 parts.append(extra.rstrip(";"))
             candidates.append((driver, ";".join(parts) + ";"))
 
     return candidates
 
+
 def resumir_error_odbc(exc: Exception) -> str:
     return " ".join(str(exc).replace("\r", " ").replace("\n", " ").split())
+
 
 def build_connection_error(attempts: list[tuple[str, str]]) -> str:
     timeout = env_int("HORI_SQL_TIMEOUT", 8)
@@ -140,9 +156,11 @@ def build_connection_error(attempts: list[tuple[str, str]]) -> str:
             lines.append(f"- {driver}: {err}")
     return "\n".join(lines)
 
+
 def conectar():
     if not all([SERVER, DATABASE, USER, PWD]):
         raise SystemExit("Faltan credenciales de BD. Configura SQL_SERVER, SQL_DATABASE, SQL_USERNAME, SQL_PASSWORD en .env")
+
     attempts: list[tuple[str, str]] = []
     for driver, conn_str in build_connection_candidates():
         try:
@@ -157,24 +175,39 @@ def conectar():
         )
     raise SystemExit(build_connection_error(attempts))
 
+
 def es_num(s):
     if pd.isna(s):
         return False
     return isinstance(s, (int, float)) or (isinstance(s, str) and num_rx.match(s))
 
-def es_num_pos(s): return es_num(s) and float(s) > 0
-def es_missing(s): return (s is None) or (str(s).strip() == '') or (es_num(s) and float(s) == 0)
-def texto_vacio(s): return pd.isna(s) or str(s).strip() == ""
+
+def es_num_pos(s):
+    return es_num(s) and float(s) > 0
+
+
+def es_missing(s):
+    return (s is None) or (str(s).strip() == "") or (es_num(s) and float(s) == 0)
+
+
+def texto_vacio(s):
+    return pd.isna(s) or str(s).strip() == ""
+
 
 def clasifica(h1, h2, f1, f2):
     h1, h2 = float(h1), float(h2)
     dias, diff = (f1 - f2).days, h1 - h2
     max_h = dias * 24
-    if h1 == h2 == 0:  return "Horímetros en 0", dias, diff, max_h
-    if dias <= 0:      return "Fechas invertidas/iguales", dias, diff, max_h
-    if diff < 0:       return "Horas disminuidas", dias, diff, max_h
-    if diff > max_h:   return "Exceso en el horímetro", dias, diff, max_h
+    if h1 == h2 == 0:
+        return "Horímetros en 0", dias, diff, max_h
+    if dias <= 0:
+        return "Fechas invertidas/iguales", dias, diff, max_h
+    if diff < 0:
+        return "Horas disminuidas", dias, diff, max_h
+    if diff > max_h:
+        return "Exceso en el horímetro", dias, diff, max_h
     return "Correcto", dias, diff, max_h
+
 
 # SQL
 SQL_HIST_BATCH = """
@@ -196,6 +229,7 @@ FROM OSCL
 WHERE status = -1 AND CAST(createDate AS date) = ?
 ORDER BY createDate DESC;"""
 
+
 # consultas
 def historiales_dia(conn, dia):
     """Retorna dict {manufSN: [rows...]} con el historial de cada equipo activo ese día."""
@@ -205,9 +239,21 @@ def historiales_dia(conn, dia):
     finally:
         cur.close()
     por_sn = {}
-    for r in rows:
-        por_sn.setdefault(r.Numero_Serie, []).append(r)
+    for row in rows:
+        por_sn.setdefault(row.Numero_Serie, []).append(row)
     return por_sn
+
+
+def limpiar_resolution_en_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "resolution" not in df.columns:
+        return df
+
+    df["resolution"] = df.apply(
+        lambda row: limpiar_resolution(row["resolution"], row.get("Técnico", ""), row.get("Fecha OT")),
+        axis=1,
+    )
+    return df
+
 
 def ots_cerradas_dia(conn, dia):
     cur = conn.cursor()
@@ -216,13 +262,36 @@ def ots_cerradas_dia(conn, dia):
         cols = [c[0] for c in cur.description]
     finally:
         cur.close()
+
     df = pd.DataFrame(map(tuple, rows), columns=cols)
-    if not df.empty and "resolution" in df.columns:
-        df["resolution"] = df.apply(
-            lambda row: limpiar_resolution(row["resolution"], row.get("Técnico", ""), row.get("Fecha OT")),
-            axis=1,
-        )
-    return df
+    return limpiar_resolution_en_dataframe(df)
+
+
+def normalizar_linea_resolution(linea: str) -> str:
+    linea = re.sub(r"^\s*WORK\s+PERFORMED\s*:\s*", "", linea, flags=re.IGNORECASE).strip()
+    return re.sub(r"\s+", " ", linea).strip()
+
+
+def es_linea_resolution_descartable(linea_norm: str, linea_key: str, tecnico: str, tecnico_con_fecha: str) -> bool:
+    if not linea_norm:
+        return True
+    if linea_key in {"all ok", "ok", "todo ok"}:
+        return True
+
+    # Quita firmas tipo "Nombre Apellido (2026-02-03)" aunque el técnico
+    # en la fila venga vacío o desplazado.
+    if re.fullmatch(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]+(?:\s+[A-Za-zÁÉÍÓÚáéíóúÑñ]+)+\s*\(\d{4}-\d{2}-\d{2}\)", linea_norm):
+        return True
+
+    # Quita fechas sueltas al final.
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", linea_norm):
+        return True
+
+    if tecnico and linea_key in {tecnico, tecnico_con_fecha}:
+        return True
+
+    return False
+
 
 def limpiar_resolution(texto, tecnico="", fecha=None):
     if texto is None:
@@ -238,38 +307,16 @@ def limpiar_resolution(texto, tecnico="", fecha=None):
         fecha_dt = pd.to_datetime(fecha, errors="coerce")
         fecha_txt = "" if pd.isna(fecha_dt) else fecha_dt.strftime("%Y-%m-%d")
 
+    tecnico_con_fecha = f"{tecnico} ({fecha_txt})" if fecha_txt else tecnico
     lineas_limpias = []
     vistos = set()
 
     for linea in texto.split("\n"):
-        linea = linea.strip()
-        if not linea:
-            continue
-
-        linea = re.sub(r"^\s*WORK\s+PERFORMED\s*:\s*", "", linea, flags=re.IGNORECASE).strip()
-        if not linea:
-            continue
-
-        linea_norm = re.sub(r"\s+", " ", linea).strip()
+        linea_norm = normalizar_linea_resolution(linea.strip())
         linea_key = linea_norm.lower()
 
-        if linea_key in {"all ok", "ok", "todo ok"}:
+        if es_linea_resolution_descartable(linea_norm, linea_key, tecnico, tecnico_con_fecha):
             continue
-
-        # Quita firmas tipo "Nombre Apellido (2026-02-03)" aunque el técnico
-        # en la fila venga vacío o desplazado.
-        if re.fullmatch(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]+(?:\s+[A-Za-zÁÉÍÓÚáéíóúÑñ]+)+\s*\(\d{4}-\d{2}-\d{2}\)", linea_norm):
-            continue
-
-        # Quita fechas sueltas al final.
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", linea_norm):
-            continue
-
-        if tecnico:
-            tecnico_con_fecha = f"{tecnico} ({fecha_txt})" if fecha_txt else tecnico
-            if linea_key in {tecnico, tecnico_con_fecha}:
-                continue
-
         if linea_key in vistos:
             continue
 
@@ -278,8 +325,9 @@ def limpiar_resolution(texto, tecnico="", fecha=None):
 
     return "\n".join(lineas_limpias)
 
+
 # QC filas
-def resumen(r1, estado, faltas=""):
+def resumen(r1, estado, faltas="") -> QCRow:
     return {
         "ERROR": estado,
         "Estado OT": "Único",
@@ -291,16 +339,19 @@ def resumen(r1, estado, faltas=""):
         "Faltas Horímetro": faltas,
     }
 
+
 def contar_faltas(hist, idx):
-    return sum(1 for r in hist[idx:] if es_missing(r.Horimetro))
+    return sum(1 for row in hist[idx:] if es_missing(row.Horimetro))
+
 
 def procesar(hist, corte):
-    r1 = next((r for r in hist if r.Fecha.date() == corte), None)
-    if not r1: return None
-    idx = hist.index(r1)
+    r1 = next((row for row in hist if row.Fecha.date() == corte), None)
+    if not r1:
+        return None
 
+    idx = hist.index(r1)
     if es_num_pos(r1.Horimetro):
-        prev = next((r for r in hist[idx+1:] if es_num_pos(r.Horimetro)), None)
+        prev = next((row for row in hist[idx + 1 :] if es_num_pos(row.Horimetro)), None)
         if not prev:
             return resumen(r1, "Correcto")
         estado, *_ = clasifica(r1.Horimetro, prev.Horimetro, r1.Fecha, prev.Fecha)
@@ -309,27 +360,80 @@ def procesar(hist, corte):
     faltas = contar_faltas(hist, idx)
     return resumen(r1, "Sin horímetro reciente", faltas)
 
-def es_error_relevante(r):
-    if r["ERROR"] in HARD_ERRORS: return True
-    return r["ERROR"] == "Sin horímetro reciente" and str(r["Faltas Horímetro"]).strip() == "1"
+
+def es_error_relevante(row):
+    if row["ERROR"] in HARD_ERRORS:
+        return True
+    return row["ERROR"] == "Sin horímetro reciente" and str(row["Faltas Horímetro"]).strip() == "1"
+
+
+def marcar_ots_duplicadas(qc_rows: list[QCRow]) -> None:
+    dup_counts = Counter(row["Call ID"] for row in qc_rows)
+    for row in qc_rows:
+        if dup_counts[row["Call ID"]] > 1:
+            row["Estado OT"] = "Duplicada"
+
+
+def obtener_qc_rows(conn, dia) -> list[QCRow]:
+    qc_rows: list[QCRow] = []
+    for _, hist in historiales_dia(conn, dia).items():
+        row = procesar(hist, dia)
+        if row:
+            qc_rows.append(row)
+
+    marcar_ots_duplicadas(qc_rows)
+    qc_rows.sort(key=lambda row: (PRIO.get(row["ERROR"], 99), row["Número de Serie"]))
+    return qc_rows
+
 
 # Motivos Servicio Cliente
 def motivos_sc(row, dup_ids):
     motivos = []
-    if row["Call ID"] in dup_ids:                    motivos.append("OT duplicada")
-    if texto_vacio(row["Número de Serie"]):          motivos.append("Sin número de serie")
-
+    if row["Call ID"] in dup_ids:
+        motivos.append("OT duplicada")
+    if texto_vacio(row["Número de Serie"]):
+        motivos.append("Sin número de serie")
     if "http" in str(row["resolution"]).lower():
         motivos.append("Link en resolución")
-
     return "; ".join(motivos)
+
 
 def reporte_sc(df):
     dup_ids = df["Call ID"][df["Call ID"].duplicated(keep=False)].unique()
-    df["Motivos SC"] = df.apply(lambda r: motivos_sc(r, dup_ids), axis=1)
+    df["Motivos SC"] = df.apply(lambda row: motivos_sc(row, dup_ids), axis=1)
     return df[df["Motivos SC"] != ""]
 
+
 # export util
+def obtener_formato_columna(col: str, centered_cols: set[str], date_cols: set[str], centered_fmt, centered_date_fmt, text_fmt):
+    if col in date_cols:
+        return centered_date_fmt
+    if col in centered_cols:
+        return centered_fmt
+    return text_fmt
+
+
+def escribir_valor_fecha(ws, row_idx: int, col_idx: int, value, centered_fmt, centered_date_fmt) -> None:
+    if pd.isna(value) or value == "":
+        ws.write_blank(row_idx, col_idx, None, centered_date_fmt)
+        return
+
+    date_value = pd.to_datetime(value, errors="coerce")
+    if pd.isna(date_value):
+        ws.write(row_idx, col_idx, value, centered_fmt)
+    else:
+        ws.write_datetime(row_idx, col_idx, date_value.to_pydatetime(), centered_date_fmt)
+
+
+def calcular_ancho_columna(df: pd.DataFrame, col: str, width_overrides: dict[str, int]) -> int:
+    try:
+        max_len = max(len(str(col)), int(df[col].astype(str).str.len().max()))
+    except Exception:
+        max_len = len(str(col))
+
+    width = min(60, max(12, max_len + 2))
+    return max(width, width_overrides.get(col, 0))
+
 
 def aplicar_formato_excel(wb, ws, df: pd.DataFrame):
     header_fmt = wb.add_format({"bold": True, "bg_color": "#F47C20", "font_color": "#FFFFFF"})
@@ -357,34 +461,23 @@ def aplicar_formato_excel(wb, ws, df: pd.DataFrame):
     }
 
     for i, col in enumerate(df.columns):
-        try:
-            max_len = max(len(str(col)), int(df[col].astype(str).str.len().max()))
-        except Exception:
-            max_len = len(str(col))
-
-        width = min(60, max(12, max_len + 2))
-        width = max(width, width_overrides.get(col, 0))
-        fmt = centered_date_fmt if col in date_cols else centered_fmt if col in centered_cols else text_fmt
+        width = calcular_ancho_columna(df, col, width_overrides)
+        fmt = obtener_formato_columna(col, centered_cols, date_cols, centered_fmt, centered_date_fmt, text_fmt)
         ws.set_column(i, i, width, fmt)
 
         if col in date_cols:
             for row_idx, value in enumerate(df[col], start=1):
-                if pd.isna(value) or value == "":
-                    ws.write_blank(row_idx, i, None, centered_date_fmt)
-                    continue
-                date_value = pd.to_datetime(value, errors="coerce")
-                if pd.isna(date_value):
-                    ws.write(row_idx, i, value, centered_fmt)
-                else:
-                    ws.write_datetime(row_idx, i, date_value.to_pydatetime(), centered_date_fmt)
+                escribir_valor_fecha(ws, row_idx, i, value, centered_fmt, centered_date_fmt)
 
-def export(df, nombre, tag, base_dir: Path):
+
+def export(df, nombre, tag, base_dir: Path) -> GeneratedReport:
     csv_path = base_dir / f"{nombre}_{tag}.csv"
     xls_path = base_dir / f"{nombre}_{tag}.xlsx"
     df.to_csv(csv_path, index=False, encoding="utf-8")
 
     try:
         import xlsxwriter  # asegura el engine
+
         with pd.ExcelWriter(xls_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd") as writer:
             df.to_excel(writer, index=False, header=False, startrow=1, sheet_name="Hoja1")
             wb = writer.book
@@ -395,6 +488,7 @@ def export(df, nombre, tag, base_dir: Path):
 
     return csv_path.name, xls_path.name if xls_path.exists() else "(sin .xlsx)"
 
+
 def export_xlsx_por_error(df: pd.DataFrame, xlsx_path: Path, pintar_fila_completa: bool = False):
     """
     - Encabezado (fila 0) naranja #F47C20 y texto blanco (solo si hay texto).
@@ -404,6 +498,7 @@ def export_xlsx_por_error(df: pd.DataFrame, xlsx_path: Path, pintar_fila_complet
         * True  -> colorea toda la fila.
     """
     import xlsxwriter  # asegura el engine
+
     with pd.ExcelWriter(xlsx_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd") as writer:
         df.to_excel(writer, index=False, header=False, startrow=1, sheet_name="Hoja1")
         wb = writer.book
@@ -428,7 +523,7 @@ def export_xlsx_por_error(df: pd.DataFrame, xlsx_path: Path, pintar_fila_complet
                     ws.write(excel_row, col_error_idx, df.iloc[i, col_error_idx], fmt)
 
 
-def export_coloreado_por_error(df, nombre, tag, base_dir: Path):
+def export_coloreado_por_error(df, nombre, tag, base_dir: Path) -> GeneratedReport:
     csv_path = base_dir / f"{nombre}_{tag}.csv"
     xls_path = base_dir / f"{nombre}_{tag}.xlsx"
     df.to_csv(csv_path, index=False, encoding="utf-8")
@@ -439,8 +534,8 @@ def export_coloreado_por_error(df, nombre, tag, base_dir: Path):
     return csv_path.name, xls_path.name if xls_path.exists() else "(sin .xlsx)"
 
 
-QC_COLS = ["ERROR", "Call ID", "Técnico", "Número de Serie",
-           "Fecha de Cierre", "Horímetro", "Faltas Horímetro", "Estado OT"]
+QC_COLS = ["ERROR", "Call ID", "Técnico", "Número de Serie", "Fecha de Cierre", "Horímetro", "Faltas Horímetro", "Estado OT"]
+
 
 def preparar_df_qc(rows):
     df = pd.DataFrame(rows)[QC_COLS]
@@ -448,13 +543,39 @@ def preparar_df_qc(rows):
     df["ERROR"] = df["ERROR"].replace({"Correcto": "", "Fechas invertidas/iguales": ""})
     return df
 
+
+def agregar_reporte_qc(out: list[GeneratedReport], qc_rows: list[QCRow], tag: str, base_dir: Path) -> None:
+    if not qc_rows:
+        return
+
+    out.append(export_coloreado_por_error(preparar_df_qc(qc_rows), "horimetros", tag, base_dir))
+
+    qc_err = [row for row in qc_rows if es_error_relevante(row)]
+    if qc_err:
+        out.append(export_coloreado_por_error(preparar_df_qc(qc_err), "horimetros_errores", tag, base_dir))
+
+
+def agregar_reportes_servicio_cliente(out: list[GeneratedReport], conn, dia, tag: str, base_dir: Path) -> None:
+    df_c = ots_cerradas_dia(conn, dia)
+    if df_c.empty:
+        return
+
+    out.append(export(df_c, "ots_cerradas", tag, base_dir))
+    df_sc = reporte_sc(df_c.copy())
+    if not df_sc.empty:
+        out.append(export(df_sc, "errores_servicio", tag, base_dir))
+
+
 # main
 def main():
     init(autoreset=True)
     pa = argparse.ArgumentParser()
     pa.add_argument("--fecha", required=True, help="AAAA-MM-DD")
-    pa.add_argument("--out", help="Carpeta de salida (opcional). "
-                                  "Si no se indica, usa HORI_BASE_DIR o reportes/ en la raíz del proyecto.")
+    pa.add_argument(
+        "--out",
+        help="Carpeta de salida (opcional). "
+        "Si no se indica, usa HORI_BASE_DIR o reportes/ en la raíz del proyecto.",
+    )
     args = pa.parse_args()
 
     dia = datetime.strptime(args.fecha, "%Y-%m-%d").date()
@@ -463,43 +584,17 @@ def main():
     conn = conectar()
 
     try:
-        # QC horímetro
-        qc_rows = []
-        for sn, hist in historiales_dia(conn, dia).items():
-            if (row := procesar(hist, dia)):
-                qc_rows.append(row)
-
-        dup_counts = Counter(r["Call ID"] for r in qc_rows)
-        for r in qc_rows:
-            if dup_counts[r["Call ID"]] > 1:
-                r["Estado OT"] = "Duplicada"
-
-        qc_rows.sort(key=lambda r: (PRIO.get(r["ERROR"], 99), r["Número de Serie"]))
-        qc_err = [r for r in qc_rows if es_error_relevante(r)]
-
-        out = []
-
-        if qc_rows:
-            out.append(export_coloreado_por_error(
-                preparar_df_qc(qc_rows), "horimetros", tag, base_dir))
-
-        if qc_err:
-            out.append(export_coloreado_por_error(
-                preparar_df_qc(qc_err), "horimetros_errores", tag, base_dir))
-
-        # Servicio Cliente
-        df_c = ots_cerradas_dia(conn, dia)
-        if not df_c.empty:
-            out.append(export(df_c, "ots_cerradas", tag, base_dir))
-            df_sc = reporte_sc(df_c.copy())
-            if not df_sc.empty:
-                out.append(export(df_sc, "errores_servicio", tag, base_dir))
+        out: list[GeneratedReport] = []
+        qc_rows = obtener_qc_rows(conn, dia)
+        agregar_reporte_qc(out, qc_rows, tag, base_dir)
+        agregar_reportes_servicio_cliente(out, conn, dia, tag, base_dir)
     finally:
         conn.close()
 
     print(Style.BRIGHT + f"\nArchivos generados en: {base_dir}" + Style.RESET_ALL)
-    for c, x in out:
-        print(f"  {c}\n  {x}")
+    for csv_name, xlsx_name in out:
+        print(f"  {csv_name}\n  {xlsx_name}")
+
 
 if __name__ == "__main__":
     main()
