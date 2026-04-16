@@ -1,0 +1,5 @@
+pyodbc==5.3.0
+colorama==0.4.6
+pandas==3.0.1
+xlsxwriter==3.2.9
+python-dotenv==1.2.2
